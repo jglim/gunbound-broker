@@ -1,4 +1,5 @@
-import socketserver
+import socket
+import threading
 import json
 
 # List of servers to be broadcast by the broker server
@@ -16,6 +17,7 @@ broker_address, broker_port = "0.0.0.0", 8372
 # 04, 05 = Packet command
 # 06 onwards = Packet parameters
 
+# To package as single binary: pyinstaller --onefile broker.py
 
 class ServerOption:
     # Describes a server to be broadcast by the broker server
@@ -30,26 +32,82 @@ class ServerOption:
         self.server_enabled = server_enabled
 
 
-class BrokerTCPHandler(socketserver.BaseRequestHandler):
-    def handle(self):
-        data = self.request.recv(1024).strip()
-        print("Packet from", self.client_address[0], "(", len(data), "bytes )")
-        print_hex(data)
+class ThreadedServer(object):
+    def __init__(self, host, port):
+        self.host = host
+        self.port = port
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind((self.host, self.port))
+        print("TCP Bound")
 
-        if (data[4] == 0x10) and (data[5] == 0x13):
-            print("Authentication Request")
-            self.request.sendall(get_response_login())
-        elif (data[3] == 0x00) and (data[4] == 0x11):
-            print("Server Directory Request")
-            self.request.sendall(get_response_directory())
-            # Keeps the connection alive for longer, else the client drops out
-            for delay in range(0, 1000):
-                self.request.recv(1024).strip()
-        else:
-            print("Unknown Packet")
-            self.request.sendall(get_response_directory())
+    def listen(self):
+        self.sock.listen(5)
+        print("Listening on", self.host, ":", self.port)
+        while True:
+            client, address = self.sock.accept()
+            client.settimeout(6000)
+            threading.Thread(target=self.client_connection, args=(client, address)).start()
 
-        print("------------------------")
+    def client_connection(self, client, address):
+        print("New connection from", address)
+        socket_rx_size = 1024
+        # This value is supposed to be used during calculation of the sequence bytes
+        socket_rx_sum = 0
+
+        while True:
+            try:
+                data = client.recv(socket_rx_size)
+                if data:
+                    if len(data) < 6:
+                        print("Invalid Packet (length < 6)")
+                        print(data)
+                    else:
+                        # Try parse basic packet information
+                        payload_size = (data[1] << 8) | data[0]
+                        client_command = (data[5] << 8) | data[4]
+
+                        print("")
+                        print_hex(data)
+
+                        socket_rx_sum += payload_size
+
+                        # Reply client if the service request is recognized
+                        if client_command == 0x1013:
+                            print("Authentication Request")
+                            client.send(get_response_login())
+
+                        elif client_command == 0x1100:
+                            print("Server Directory Request")
+                            client.send(get_response_directory())
+                else:
+                    print("Client disconnected")
+                    return True
+            except:
+                client.close()
+                return False
+
+
+#class BrokerTCPHandler(socketserver.BaseRequestHandler):
+#    def handle(self):
+#        data = self.request.recv(1024).strip()
+#        print("Packet from", self.client_address[0], "(", len(data), "bytes )")
+#        print_hex(data)
+#
+#        if (data[4] == 0x10) and (data[5] == 0x13):
+#            print("Authentication Request")
+#            self.request.sendall(get_response_login())
+#        elif (data[3] == 0x00) and (data[4] == 0x11):
+#            print("Server Directory Request")
+#            self.request.sendall(get_response_directory())
+#            # Keeps the connection alive for longer, else the client drops out
+#            for delay in range(0, 10000):
+#                self.request.recv(1024).strip()
+#        else:
+#            print("Unknown Packet")
+#            self.request.sendall(get_response_directory())
+#
+#        print("------------------------")
 
 
 # Zero-indexed, 0 = LSB
@@ -191,9 +249,4 @@ if __name__ == "__main__":
     for server_option in server_options:
         print("Server:", server_option.server_name, "-", server_option.server_description,
               "on port", server_option.server_port)
-
-    server = socketserver.TCPServer((broker_address, broker_port), BrokerTCPHandler)
-
-    print("Listening on", broker_address, "at port", broker_port)
-    print("------------------------")
-    server.serve_forever()
+    ThreadedServer(broker_address, broker_port).listen()
